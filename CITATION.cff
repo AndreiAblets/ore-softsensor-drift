@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the software repository."
+title: "Calibration-drift robustness experiments for ore grinding soft sensors"
+authors:
+  - family-names: "Ablets"
+    given-names: "Andrii"
+    orcid: "https://orcid.org/0009-0005-9692-9846"
+version: "0.1.0"
+date-released: "2026-04-27"
+license: "MIT"
