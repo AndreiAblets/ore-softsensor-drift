@@ -1,5 +1,7 @@
 # Ore Soft-Sensor Drift
 
+[![DOI](https://zenodo.org/badge/1222806124.svg)](https://doi.org/10.5281/zenodo.19828095)
+
 This repository contains a compact reproduction pipeline for calibration-drift robustness experiments on a public ore grinding and grading dataset.
 
 The code evaluates source-trained soft sensors under small multiplicative sensor drift. It identifies drift-sensitive channels and tests three remediation strategies: feature removal, batch moment correction, and deployment-time CORAL alignment.
