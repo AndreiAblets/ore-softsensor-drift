@@ -2,11 +2,9 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19828095.svg)](https://doi.org/10.5281/zenodo.19828095)
 
-This repository contains a compact reproduction pipeline for calibration-drift robustness experiments on a public ore grinding and grading dataset.
+This repository contains reproduction code for calibration-drift robustness experiments on a public ore grinding and grading dataset.
 
-The code evaluates source-trained soft sensors under small multiplicative sensor drift. It identifies drift-sensitive channels and tests three remediation strategies: feature removal, batch moment correction, and deployment-time CORAL alignment.
-
-The feature-removal remedy selects the removed channel from the training split by the largest vulnerability index. No sensor index is hardcoded.
+The pipeline trains source-domain soft sensors, applies small multiplicative drift to sensor channels, computes feature vulnerability scores from the training data, and evaluates feature removal, batch moment correction, jitter augmentation, CORAL alignment, conformal coverage, and batch z-score drift detection.
 
 ## Repository layout
 
@@ -22,7 +20,7 @@ ore-softsensor-drift/
 
 ## Data
 
-The data are not bundled with this repository. Download version 1 of the public Mendeley dataset:
+Download version 1 of the public Mendeley dataset:
 
 ```text
 Dataset on ore grinding and grading process
@@ -40,9 +38,7 @@ data/hgsf7bwkrv-1/
   Y_tar.csv
 ```
 
-The Mendeley Data record lists this dataset under CC BY 4.0. This repository only contains code.
-
-The public metadata do not define the ore type, mill type, class semantics, sampling rate, or source/target split criterion. The code uses the numeric labels and the released source/target files as provided. The loader removes the all-zero first row from each feature matrix and uses the remaining eight measured rows.
+The Mendeley Data record lists this dataset under CC BY 4.0. The loader uses the released source and target files, removes the all-zero first feature row, and keeps the remaining measured rows.
 
 ## Install
 
@@ -72,7 +68,7 @@ Full reproduction:
 python scripts/run_reproduction.py --data-dir data/hgsf7bwkrv-1 --output-dir outputs --seeds 0,1,2,3,4
 ```
 
-Quick smoke run:
+Short run:
 
 ```bash
 python scripts/run_reproduction.py --data-dir data/hgsf7bwkrv-1 --output-dir outputs_quick --seeds 0 --fast

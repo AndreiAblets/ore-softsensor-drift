@@ -18,6 +18,4 @@ data/hgsf7bwkrv-1/
   Y_tar.csv
 ```
 
-The CSV files are not included here. The Mendeley Data record lists the dataset under CC BY 4.0.
-
-The public metadata do not define the ore type, mill type, class semantics, sampling rate, or source/target split criterion. The reproduction code uses the numeric labels and the released source/target files as provided, removes the all-zero first feature row, and keeps the remaining eight measured rows.
+The Mendeley Data record lists the dataset under CC BY 4.0. The loader uses the released source and target files, removes the all-zero first feature row, and keeps the remaining measured rows.

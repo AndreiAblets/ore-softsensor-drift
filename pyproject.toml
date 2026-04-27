@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ore-softsensor-drift"
-version = "0.1.0"
+version = "1.0.0"
 description = "Reproducible experiments for calibration-drift robustness of ore grinding soft sensors."
 readme = "README.md"
 requires-python = ">=3.10"
