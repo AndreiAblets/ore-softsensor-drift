@@ -1,6 +1,6 @@
 # Ore Soft-Sensor Drift
 
-[![DOI](https://zenodo.org/badge/1222806124.svg)](https://doi.org/10.5281/zenodo.19828095)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19828095.svg)](https://doi.org/10.5281/zenodo.19828095)
 
 This repository contains a compact reproduction pipeline for calibration-drift robustness experiments on a public ore grinding and grading dataset.
 
