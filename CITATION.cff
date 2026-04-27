@@ -5,7 +5,7 @@ authors:
   - family-names: "Ablets"
     given-names: "Andrii"
     orcid: "https://orcid.org/0009-0005-9692-9846"
-version: "1.0.0"
+version: "1.0.1"
 date-released: "2026-04-27"
 license: "MIT"
 repository-code: "https://github.com/AndreiAblets/ore-softsensor-drift"
@@ -14,5 +14,5 @@ identifiers:
     value: "10.5281/zenodo.19828095"
     description: "Concept DOI (all versions)"
   - type: doi
-    value: "10.5281/zenodo.19828096"
-    description: "Version DOI (v1.0.0)"
+    value: "10.5281/zenodo.19828636"
+    description: "Version DOI (v1.0.1)"
