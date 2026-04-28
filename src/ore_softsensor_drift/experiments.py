@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.model_selection import StratifiedShuffleSplit
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
 
 from .conformal import run_aps
 from .data import (
@@ -21,11 +21,11 @@ from .data import (
     apply_global_drift,
     apply_jitter,
     batch_moment_correction,
-    highest_vi_feature,
+    highest_inverse_cv_feature,
+    inverse_cv_scores,
+    inverse_cv_table,
     load_dataset,
     make_split,
-    vulnerability_scores,
-    vulnerability_table,
 )
 from .metrics import aggregate, apply_temperature, evaluate, fit_temperature
 from .models import MLPConfig, TorchMLP, apply_coral, fit_coral, fit_hgb, fit_logreg
@@ -34,6 +34,9 @@ from .models import MLPConfig, TorchMLP, apply_coral, fit_coral, fit_hgb, fit_lo
 DRIFT_GRID = [0.0, 0.01, 0.02, 0.05, 0.10, 0.15, 0.20]
 DETECTION_THRESHOLDS = [2.0, 3.0, 5.0]
 JITTER_SCALES = [0.01, 0.02, 0.05, 0.10]
+DIAGNOSTIC_SPLIT_SEED = 0
+DIAGNOSTIC_SUBSAMPLE_SEED = 42
+REGIME_KMEANS_SEED = 42
 
 
 @dataclass(frozen=True)
@@ -56,29 +59,56 @@ class Reproduction:
 
     def run(self) -> None:
         baseline = self.baseline()
-        drift, per_channel = self.drift_fragility()
+        drift, per_channel, per_channel_005 = self.drift_fragility()
+        robustness = self.model_robustness()
+        preprocessing = self.preprocessing_robustness()
         remedies, coral = self.remedies()
         conformal = self.conformal_reliability()
         detection = self.drift_detection()
         regime = self.regime_ood()
-        vi = vulnerability_table(self.data)
-        high_vi = self.high_vi_selection()
+        amplification = inverse_cv_table(self.data)
+        high_inverse_cv = self.high_inverse_cv_selection()
+        coef_audit = self.logreg_coefficient_audit()
 
         self.write_table("baseline_mean_std.csv", aggregate(baseline, ["model"], ["macro_f1", "accuracy", "ece", "brier"]))
         self.write_table("drift_global_mean_std.csv", aggregate(drift, ["drift_eps"], ["macro_f1", "accuracy", "ece", "brier"]))
-        self.write_table("drift_per_channel_005.csv", aggregate(per_channel, ["feature", "tag"], ["macro_f1", "accuracy"]))
+        self.write_table("drift_per_channel_all.csv", aggregate(per_channel, ["feature", "tag", "drift_eps"], ["macro_f1", "accuracy"]))
+        self.write_table("drift_per_channel_005.csv", aggregate(per_channel_005, ["feature", "tag"], ["macro_f1", "accuracy"]))
+        self.write_table("model_robustness_long.csv", aggregate(robustness, ["drift_eps", "model"], ["macro_f1", "accuracy"]))
+        self.write_wide_metric("model_robustness_mean.csv", robustness, "macro_f1", "mean")
+        self.write_wide_metric("model_robustness_std.csv", robustness, "macro_f1", "std")
+        self.write_table("preprocessing_robustness_long.csv", aggregate(preprocessing, ["drift_eps", "preprocessing"], ["macro_f1", "accuracy"]))
+        self.write_wide_metric("preprocessing_robustness_mean.csv", preprocessing, "macro_f1", "mean", columns="preprocessing")
+        self.write_wide_metric("preprocessing_robustness_std.csv", preprocessing, "macro_f1", "std", columns="preprocessing")
         self.write_table("remedies_mean_std.csv", aggregate(remedies, ["solution", "model"], ["macro_f1", "accuracy", "ece", "brier"]))
-        self.write_table("solutions_mean_std.csv", aggregate(remedies, ["solution", "model"], ["macro_f1", "accuracy", "ece", "brier"]))
         self.write_table("coral_under_drift.csv", coral)
-        self.write_table("conformal_solutions_aps.csv", aggregate(conformal, ["drift_eps", "scenario"], ["coverage", "avg_set_size", "macro_f1"]))
+        self.write_table("conformal_solutions_aps.csv", aggregate(conformal, ["drift_eps", "scenario"], ["coverage", "avg_set_size", "singleton_rate", "macro_f1"]))
         self.write_table("drift_detection.csv", detection)
         self.write_table("regime_ood_mean_std.csv", aggregate(regime, ["condition", "model"], ["macro_f1", "accuracy"]))
-        self.write_table("vulnerability_index.csv", vi)
-        self.write_table("high_vi_selection.csv", high_vi)
+        self.write_table("inverse_cv_amplification.csv", amplification)
+        self.write_table("high_inverse_cv_selection.csv", high_inverse_cv)
+        self.write_table("logreg_coefficient_audit.csv", coef_audit)
+        self.write_table(
+            "logreg_coefficient_audit_mean_std.csv",
+            aggregate(
+                coef_audit,
+                ["feature", "tag"],
+                [
+                    "max_abs_coef",
+                    "l2_coef",
+                    "inverse_cv",
+                    "max_logit_displacement_1pct",
+                    "l2_logit_displacement_1pct",
+                ],
+            ),
+        )
 
         self.plot_drift(drift)
-        self.plot_channel_drift(per_channel)
-        self.plot_vulnerability(vi)
+        self.plot_channel_drift(per_channel_005)
+        self.plot_channel_drift_heatmap(per_channel)
+        self.plot_amplification(amplification)
+        self.plot_model_robustness(robustness)
+        self.plot_preprocessing_robustness(preprocessing)
         self.plot_remedies(remedies)
         self.plot_coral(coral)
         self.plot_conformal(conformal)
@@ -95,7 +125,7 @@ class Reproduction:
                 rows.append({"seed": seed, "model": name, **scores.__dict__})
         return pd.DataFrame(rows)
 
-    def drift_fragility(self) -> tuple[pd.DataFrame, pd.DataFrame]:
+    def drift_fragility(self) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         global_rows = []
         channel_rows = []
         for seed in self.config.seeds:
@@ -130,7 +160,83 @@ class Reproduction:
 
         channel = pd.DataFrame(channel_rows)
         channel_005 = channel[channel["drift_eps"] == 0.05].copy()
-        return pd.DataFrame(global_rows), channel_005
+        return pd.DataFrame(global_rows), channel, channel_005
+
+    def model_robustness(self) -> pd.DataFrame:
+        rows = []
+        for seed in self.config.seeds:
+            data = self.data
+            split = make_split(data.y_src, len(data.y_tar), seed)
+            x_train_raw = data.x_src[split.train]
+            x_val_raw = data.x_src[split.val]
+            y_train = data.y_src[split.train]
+            y_val = data.y_src[split.val]
+            y_test = data.y_tar
+            drop_idx = highest_inverse_cv_feature(x_train_raw)
+            keep_inverse_cv = [i for i in range(data.x_src.shape[1]) if i != drop_idx]
+
+            for model_name, keep in [
+                ("LogReg", None),
+                ("HistGB", None),
+                ("TorchMLP", None),
+                ("LogReg_no_high_inverse_cv", keep_inverse_cv),
+            ]:
+                pre, model, temp = self.fit_standard_pipeline(
+                    "LogReg" if model_name == "LogReg_no_high_inverse_cv" else model_name,
+                    x_train_raw,
+                    y_train,
+                    x_val_raw,
+                    y_val,
+                    seed,
+                    keep,
+                )
+                for eps in DRIFT_GRID:
+                    x_test = pre.transform(apply_global_drift(data.x_tar, eps))
+                    proba = apply_temperature(model.predict_proba(x_test), temp)
+                    scores = evaluate(y_test, proba)
+                    rows.append({"seed": seed, "drift_eps": eps, "model": model_name, **scores.__dict__})
+        return pd.DataFrame(rows)
+
+    def preprocessing_robustness(self) -> pd.DataFrame:
+        rows = []
+        for seed in self.config.seeds:
+            data = self.data
+            split = make_split(data.y_src, len(data.y_tar), seed)
+            x_train_raw = data.x_src[split.train]
+            x_val_raw = data.x_src[split.val]
+            y_train = data.y_src[split.train]
+            y_val = data.y_src[split.val]
+            y_test = data.y_tar
+
+            for name, scaler in [
+                ("StandardScaler", StandardScaler()),
+                ("RobustScaler", RobustScaler()),
+                ("MinMaxScaler", MinMaxScaler()),
+                ("NoScaling", None),
+            ]:
+                if scaler is None:
+                    x_train = x_train_raw.astype(np.float32)
+                    x_val = x_val_raw.astype(np.float32)
+
+                    def transform(x: np.ndarray) -> np.ndarray:
+                        return x.astype(np.float32)
+
+                else:
+                    scaler.fit(x_train_raw)
+                    x_train = scaler.transform(x_train_raw).astype(np.float32)
+                    x_val = scaler.transform(x_val_raw).astype(np.float32)
+
+                    def transform(x: np.ndarray, fitted=scaler) -> np.ndarray:
+                        return fitted.transform(x).astype(np.float32)
+
+                model = fit_logreg(x_train, y_train, x_val, y_val, seed)
+                temp = fit_temperature(model.predict_proba(x_val), y_val)
+                for eps in DRIFT_GRID:
+                    x_test = transform(apply_global_drift(data.x_tar, eps))
+                    proba = apply_temperature(model.predict_proba(x_test), temp)
+                    scores = evaluate(y_test, proba)
+                    rows.append({"seed": seed, "drift_eps": eps, "preprocessing": name, **scores.__dict__})
+        return pd.DataFrame(rows)
 
     def remedies(self) -> tuple[pd.DataFrame, pd.DataFrame]:
         rows = []
@@ -145,15 +251,15 @@ class Reproduction:
             y_test = data.y_tar
             x_test_drift = apply_global_drift(data.x_tar, 0.05)
             rng = np.random.RandomState(seed)
-            drop_idx = highest_vi_feature(x_train_raw)
-            keep_high_vi = [i for i in range(data.x_src.shape[1]) if i != drop_idx]
+            drop_idx = highest_inverse_cv_feature(x_train_raw)
+            keep_inverse_cv = [i for i in range(data.x_src.shape[1]) if i != drop_idx]
 
             for model_name in ["LogReg", "HistGB", "TorchMLP"]:
                 proba = self.fit_standard_model(model_name, x_train_raw, y_train, x_val_raw, y_val, x_test_drift, seed)
                 rows.append({"seed": seed, "solution": "none", "model": model_name, **evaluate(y_test, proba).__dict__})
 
-                proba = self.fit_standard_model(model_name, x_train_raw, y_train, x_val_raw, y_val, x_test_drift, seed, keep_high_vi)
-                rows.append({"seed": seed, "solution": "drop_high_vi", "model": model_name, **evaluate(y_test, proba).__dict__})
+                proba = self.fit_standard_model(model_name, x_train_raw, y_train, x_val_raw, y_val, x_test_drift, seed, keep_inverse_cv)
+                rows.append({"seed": seed, "solution": "drop_high_inverse_cv", "model": model_name, **evaluate(y_test, proba).__dict__})
 
                 for scale in JITTER_SCALES:
                     x_train_jitter = apply_jitter(x_train_raw, scale, rng)
@@ -161,8 +267,8 @@ class Reproduction:
                     rows.append({"seed": seed, "solution": f"jitter_{scale:g}", "model": model_name, **evaluate(y_test, proba).__dict__})
 
                 x_train_drop_jitter = apply_jitter(x_train_raw, 0.05, rng)
-                proba = self.fit_standard_model(model_name, x_train_drop_jitter, y_train, x_val_raw, y_val, x_test_drift, seed, keep_high_vi)
-                rows.append({"seed": seed, "solution": "drop_high_vi+jitter", "model": model_name, **evaluate(y_test, proba).__dict__})
+                proba = self.fit_standard_model(model_name, x_train_drop_jitter, y_train, x_val_raw, y_val, x_test_drift, seed, keep_inverse_cv)
+                rows.append({"seed": seed, "solution": "drop_high_inverse_cv+jitter", "model": model_name, **evaluate(y_test, proba).__dict__})
 
                 proba = self.fit_batch_corrected(model_name, x_train_raw, y_train, x_val_raw, y_val, x_test_drift, seed)
                 rows.append({"seed": seed, "solution": "batch_correction", "model": model_name, **evaluate(y_test, proba).__dict__})
@@ -188,12 +294,12 @@ class Reproduction:
             y_train = data.y_src[split.train]
             y_val = data.y_src[split.val]
             y_test = data.y_tar
-            drop_idx = highest_vi_feature(data.x_src[split.train])
-            keep_high_vi = [i for i in range(data.x_src.shape[1]) if i != drop_idx]
+            drop_idx = highest_inverse_cv_feature(data.x_src[split.train])
+            keep_inverse_cv = [i for i in range(data.x_src.shape[1]) if i != drop_idx]
 
             scenarios = {
                 "original_all_features": None,
-                "drop_high_vi": keep_high_vi,
+                "drop_high_inverse_cv": keep_inverse_cv,
                 "batch_correction": None,
             }
             for scenario, keep in scenarios.items():
@@ -225,27 +331,64 @@ class Reproduction:
                     )
         return pd.DataFrame(rows)
 
-    def high_vi_selection(self) -> pd.DataFrame:
+    def high_inverse_cv_selection(self) -> pd.DataFrame:
         rows = []
         data = self.data
         for seed in self.config.seeds:
             split = make_split(data.y_src, len(data.y_tar), seed)
-            scores = vulnerability_scores(data.x_src[split.train])
+            scores = inverse_cv_scores(data.x_src[split.train])
             idx = int(np.argmax(scores))
             rows.append(
                 {
                     "seed": seed,
                     "feature": data.feature_names[idx],
                     "tag": data.feature_tags[idx],
-                    "VI_train": float(scores[idx]),
+                    "inverse_cv_train": float(scores[idx]),
                 }
             )
+        return pd.DataFrame(rows)
+
+    def logreg_coefficient_audit(self) -> pd.DataFrame:
+        rows = []
+        data = self.data
+        for seed in self.config.seeds:
+            split = make_split(data.y_src, len(data.y_tar), seed)
+            x_train_raw = data.x_src[split.train]
+            y_train = data.y_src[split.train]
+            pre = Preprocessor().fit(x_train_raw)
+            x_train = pre.transform(x_train_raw)
+            x_val = pre.transform(data.x_src[split.val])
+            y_val = data.y_src[split.val]
+            model = fit_logreg(x_train, y_train, x_val, y_val, seed)
+
+            mean = x_train_raw.mean(axis=0)
+            std = np.clip(x_train_raw.std(axis=0), 1e-10, None)
+            inverse_cv = np.abs(mean) / std
+            abs_coef = np.abs(model.coef_)
+            max_abs_coef = abs_coef.max(axis=0)
+            l2_coef = np.sqrt(np.square(model.coef_).sum(axis=0))
+            max_shift = max_abs_coef * 0.01 * inverse_cv
+            l2_shift = l2_coef * 0.01 * inverse_cv
+
+            for j, tag in enumerate(data.feature_tags):
+                rows.append(
+                    {
+                        "seed": seed,
+                        "feature": data.feature_names[j],
+                        "tag": tag,
+                        "max_abs_coef": float(max_abs_coef[j]),
+                        "l2_coef": float(l2_coef[j]),
+                        "inverse_cv": float(inverse_cv[j]),
+                        "max_logit_displacement_1pct": float(max_shift[j]),
+                        "l2_logit_displacement_1pct": float(l2_shift[j]),
+                    }
+                )
         return pd.DataFrame(rows)
 
     def drift_detection(self) -> pd.DataFrame:
         rows = []
         data = self.data
-        split = make_split(data.y_src, len(data.y_tar), seed=0)
+        split = make_split(data.y_src, len(data.y_tar), seed=DIAGNOSTIC_SPLIT_SEED)
         train = data.x_src[split.train]
         target = data.x_tar[split.target]
         mean = train.mean(axis=0)
@@ -253,7 +396,7 @@ class Reproduction:
         for eps in [0.0, 0.001, 0.005, 0.01, 0.02, 0.05, 0.10, 0.20]:
             shifted = apply_global_drift(target, eps)
             for batch_size in [50, 100, 200, 400, 800]:
-                rng = np.random.RandomState(42)
+                rng = np.random.RandomState(DIAGNOSTIC_SUBSAMPLE_SEED)
                 idx = rng.choice(len(shifted), size=min(batch_size, len(shifted)), replace=False)
                 batch = shifted[idx]
                 z = np.abs(batch.mean(axis=0) - mean) / (std / np.sqrt(len(batch)) + 1e-10)
@@ -279,7 +422,7 @@ class Reproduction:
         y_all = np.concatenate([data.y_src, data.y_tar])
         x_scaled = StandardScaler().fit_transform(x_all)
         for k in [3, 4, 5]:
-            clusters = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(x_scaled)
+            clusters = KMeans(n_clusters=k, random_state=REGIME_KMEANS_SEED, n_init=10).fit_predict(x_scaled)
             for cluster in sorted(np.unique(clusters)):
                 test_mask = clusters == cluster
                 train_mask = ~test_mask
@@ -312,6 +455,33 @@ class Reproduction:
             pre.transform(data.x_tar),
         )
 
+    def fit_standard_pipeline(
+        self,
+        model_name: str,
+        x_train_raw: np.ndarray,
+        y_train: np.ndarray,
+        x_val_raw: np.ndarray,
+        y_val: np.ndarray,
+        seed: int,
+        keep: list[int] | None = None,
+    ):
+        pre = Preprocessor(keep_features=keep).fit(x_train_raw)
+        x_train = pre.transform(x_train_raw)
+        x_val = pre.transform(x_val_raw)
+        if model_name == "LogReg":
+            model = fit_logreg(x_train, y_train, x_val, y_val, seed)
+        elif model_name == "HistGB":
+            model = fit_hgb(x_train, y_train, x_val, y_val, seed)
+        elif model_name == "TorchMLP":
+            epochs = 50 if self.config.fast else 250
+            patience = 8 if self.config.fast else 30
+            model = TorchMLP(MLPConfig(epochs=epochs, patience=patience), seed=seed, device=self.config.device)
+            model.fit(x_train, y_train, x_val, y_val)
+        else:
+            raise ValueError(f"Unknown model: {model_name}")
+        temp = fit_temperature(model.predict_proba(x_val), y_val)
+        return pre, model, temp
+
     def fit_standard_model(
         self,
         model_name: str,
@@ -323,11 +493,9 @@ class Reproduction:
         seed: int,
         keep: list[int] | None = None,
     ) -> np.ndarray:
-        pre = Preprocessor(keep_features=keep).fit(x_train_raw)
-        x_train = pre.transform(x_train_raw)
-        x_val = pre.transform(x_val_raw)
+        pre, model, temp = self.fit_standard_pipeline(model_name, x_train_raw, y_train, x_val_raw, y_val, seed, keep)
         x_test = pre.transform(x_test_raw)
-        return self.fit_predict(model_name, x_train, y_train, x_val, y_val, x_test, seed, x_test)
+        return apply_temperature(model.predict_proba(x_test), temp)
 
     def fit_batch_corrected(
         self,
@@ -420,6 +588,12 @@ class Reproduction:
     def write_table(self, name: str, table: pd.DataFrame) -> None:
         table.to_csv(self.tables / name, index=False)
 
+    def write_wide_metric(self, name: str, table: pd.DataFrame, metric: str, aggfunc: str, columns: str = "model") -> None:
+        wide = table.pivot_table(index="drift_eps", columns=columns, values=metric, aggfunc=aggfunc)
+        wide = wide.reset_index()
+        wide.columns.name = None
+        wide.to_csv(self.tables / name, index=False)
+
     def plot_drift(self, drift: pd.DataFrame) -> None:
         agg = aggregate(drift, ["drift_eps"], ["macro_f1"])
         fig, ax = plt.subplots(figsize=(6, 4))
@@ -442,14 +616,65 @@ class Reproduction:
         fig.savefig(self.figures / "drift_per_channel_005.png", dpi=150)
         plt.close(fig)
 
-    def plot_vulnerability(self, vi: pd.DataFrame) -> None:
+    def plot_channel_drift_heatmap(self, per_channel: pd.DataFrame) -> None:
+        agg = aggregate(per_channel, ["tag", "drift_eps"], ["macro_f1"])
+        pivot = agg.pivot(index="tag", columns="drift_eps", values="macro_f1_mean")
+        fig, ax = plt.subplots(figsize=(7, 4.2))
+        image = ax.imshow(pivot.values, aspect="auto", vmin=0.0, vmax=1.0, cmap="viridis")
+        ax.set_yticks(np.arange(len(pivot.index)))
+        ax.set_yticklabels(pivot.index)
+        ax.set_xticks(np.arange(len(pivot.columns)))
+        ax.set_xticklabels([f"{float(v):.2f}" for v in pivot.columns], rotation=45, ha="right")
+        ax.set_xlabel("Multiplicative drift")
+        ax.set_title("Per-channel drift stress test")
+        cbar = fig.colorbar(image, ax=ax)
+        cbar.set_label("Macro-F1")
+        fig.tight_layout()
+        fig.savefig(self.figures / "drift_heatmap_channel_eps.png", dpi=150)
+        plt.close(fig)
+
+    def plot_amplification(self, amplification: pd.DataFrame) -> None:
         fig, ax = plt.subplots(figsize=(7, 4))
-        data = vi.sort_values("VI")
-        ax.barh(data["tag"], data["VI"])
-        ax.set_xlabel("Vulnerability index")
+        data = amplification.sort_values("inverse_cv")
+        ax.barh(data["tag"], data["inverse_cv"])
+        ax.set_xlabel("Inverse-CV gain-amplification score")
         ax.set_title("Feature drift amplification")
         fig.tight_layout()
-        fig.savefig(self.figures / "vulnerability_index.png", dpi=150)
+        fig.savefig(self.figures / "inverse_cv_amplification.png", dpi=150)
+        plt.close(fig)
+
+    def plot_model_robustness(self, robustness: pd.DataFrame) -> None:
+        fig, ax = plt.subplots(figsize=(7, 4))
+        for model, sub in robustness.groupby("model"):
+            agg = aggregate(sub, ["drift_eps"], ["macro_f1"])
+            ax.errorbar(
+                agg["drift_eps"],
+                agg["macro_f1_mean"],
+                yerr=agg["macro_f1_std"],
+                marker="o",
+                label=model,
+            )
+        ax.set_xlabel("Multiplicative drift")
+        ax.set_ylabel("Macro-F1")
+        ax.set_title("Model robustness under drift")
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.25)
+        fig.tight_layout()
+        fig.savefig(self.figures / "model_robustness_drift.png", dpi=150)
+        plt.close(fig)
+
+    def plot_preprocessing_robustness(self, preprocessing: pd.DataFrame) -> None:
+        fig, ax = plt.subplots(figsize=(7, 4))
+        for name, sub in preprocessing.groupby("preprocessing"):
+            agg = aggregate(sub, ["drift_eps"], ["macro_f1"])
+            ax.plot(agg["drift_eps"], agg["macro_f1_mean"], marker="o", label=name)
+        ax.set_xlabel("Multiplicative drift")
+        ax.set_ylabel("Macro-F1")
+        ax.set_title("Preprocessing robustness")
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.25)
+        fig.tight_layout()
+        fig.savefig(self.figures / "preprocessing_robustness.png", dpi=150)
         plt.close(fig)
 
     def plot_remedies(self, remedies: pd.DataFrame) -> None:
@@ -489,7 +714,7 @@ class Reproduction:
         ax.legend(fontsize=8)
         ax.grid(alpha=0.25)
         fig.tight_layout()
-        fig.savefig(self.figures / "conformal_solutions_coverage.png", dpi=150)
+        fig.savefig(self.figures / "conformal_solutions_coverage_vs_drift.png", dpi=150)
         plt.close(fig)
 
     def plot_detection(self, detection: pd.DataFrame) -> None:
@@ -515,5 +740,5 @@ class Reproduction:
         ax.set_title("Regime holdout check")
         fig = ax.get_figure()
         fig.tight_layout()
-        fig.savefig(self.figures / "regime_ood.png", dpi=150)
+        fig.savefig(self.figures / "regime_ood_bar.png", dpi=150)
         plt.close(fig)

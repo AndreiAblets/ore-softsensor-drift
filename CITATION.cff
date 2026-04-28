@@ -1,18 +1,15 @@
 cff-version: 1.2.0
 message: "If you use this code, please cite the software repository."
-title: "Calibration-drift robustness experiments for ore grinding soft sensors"
+title: "Calibration-drift robustness experiments for ore grinding SCADA state classifiers"
 authors:
   - family-names: "Ablets"
     given-names: "Andrii"
     orcid: "https://orcid.org/0009-0005-9692-9846"
-version: "1.0.1"
-date-released: "2026-04-27"
+version: "1.0.2"
+date-released: "2026-04-28"
 license: "MIT"
 repository-code: "https://github.com/AndreiAblets/ore-softsensor-drift"
 identifiers:
   - type: doi
     value: "10.5281/zenodo.19828095"
     description: "Concept DOI (all versions)"
-  - type: doi
-    value: "10.5281/zenodo.19828636"
-    description: "Version DOI (v1.0.1)"

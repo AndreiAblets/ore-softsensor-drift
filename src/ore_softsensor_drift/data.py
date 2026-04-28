@@ -123,31 +123,31 @@ def batch_moment_correction(x_test: np.ndarray, x_train: np.ndarray) -> np.ndarr
     return ((x_test - test_mean) / test_std * train_std + train_mean).astype(np.float32)
 
 
-def vulnerability_scores(x: np.ndarray) -> np.ndarray:
+def inverse_cv_scores(x: np.ndarray) -> np.ndarray:
     mean = np.mean(x, axis=0)
     std = np.clip(np.std(x, axis=0), 1e-12, None)
     return np.abs(mean) / std
 
 
-def highest_vi_feature(x_train: np.ndarray) -> int:
-    return int(np.argmax(vulnerability_scores(x_train)))
+def highest_inverse_cv_feature(x_train: np.ndarray) -> int:
+    return int(np.argmax(inverse_cv_scores(x_train)))
 
 
-def vulnerability_table(data: Dataset) -> pd.DataFrame:
+def inverse_cv_table(data: Dataset) -> pd.DataFrame:
     rows = []
     for j, tag in enumerate(data.feature_tags):
         x = data.x_src[:, j]
         mean = float(np.mean(x))
         std = float(np.std(x))
-        vi = abs(mean) / max(std, 1e-12)
+        score = abs(mean) / max(std, 1e-12)
         rows.append(
             {
                 "feature": data.feature_names[j],
                 "tag": tag,
                 "mean": mean,
                 "std": std,
-                "VI": vi,
-                "drift_1pct_sigma": vi * 0.01,
+                "inverse_cv": score,
+                "drift_1pct_sigma": score * 0.01,
             }
         )
     return pd.DataFrame(rows)

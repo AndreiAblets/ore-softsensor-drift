@@ -15,7 +15,7 @@ def parse_seeds(value: str) -> list[int]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run soft-sensor drift robustness experiments.")
+    parser = argparse.ArgumentParser(description="Run SCADA state-classifier drift robustness experiments.")
     parser.add_argument("--data-dir", type=Path, default=Path("data/hgsf7bwkrv-1"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs"))
     parser.add_argument("--seeds", type=parse_seeds, default=[0, 1, 2, 3, 4])
